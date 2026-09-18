@@ -1,0 +1,41 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-sica-blue: #003366;
+  --color-sica-blue-light: #4a90e2;
+  --color-sica-green: #27ae60;
+  --color-sica-yellow: #f2c94c;
+  --color-sica-bg: #020617;
+  --color-sica-gray: #334155;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background-color: var(--color-sica-bg);
+  font-family:
+    'Inter',
+    system-ui,
+    -apple-system,
+    sans-serif;
+  color: #f1f5f9;
+}
+
+@keyframes sica-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.sica-fade-in {
+  animation: sica-fade-in 0.35s ease-out both;
+}
+
+.sica-fade-in-slow {
+  animation: sica-fade-in 0.5s ease-out both;
+}
