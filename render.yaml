@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: sica-backend
+    env: python
+    plan: free
+    region: oregon
+    buildCommand: cd sica-backend && pip install -r requirements.txt
+    startCommand: cd sica-backend && python server.py
+    envVars:
+      - key: SICA_HOST
+        value: 0.0.0.0
+      - key: SICA_PORT
+        value: 8002
+      - key: SICA_CORS_ORIGINS
+        value: https://sica-app.vercel.app,http://localhost:4173
+      - key: SICA_MAX_UPLOAD_MB
+        value: 10
+      - key: SICA_RATE_LIMIT_REQUESTS
+        value: 10
+      - key: SICA_RATE_LIMIT_PERIOD
+        value: 60
+      - key: SICA_ENABLE_CACHE
+        value: true
+      - key: SICA_CACHE_SIZE
+        value: 100
+      - key: SICA_CACHE_TTL
+        value: 3600
