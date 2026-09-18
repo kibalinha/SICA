@@ -3,6 +3,7 @@ export const DEFAULT_API_BASE_URL = 'http://localhost:8002';
 const env = import.meta.env as Record<string, unknown>;
 const envApiUrl = typeof env['VITE_API_URL'] === 'string' ? env['VITE_API_URL'].trim() : '';
 
+export const API_KEY = typeof env['VITE_API_KEY'] === 'string' ? env['VITE_API_KEY'].trim() : '';
 export const API_BASE_URL = envApiUrl || DEFAULT_API_BASE_URL;
 export const API_PORT = Number.parseInt(new URL(API_BASE_URL).port || '8002', 10);
 const apiVersion = 'v1';
