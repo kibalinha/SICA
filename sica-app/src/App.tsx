@@ -5,7 +5,13 @@ import { IdleState } from './components/IdleState';
 import { RecordingState } from './components/RecordingState';
 import { AnalyzingState } from './components/AnalyzingState';
 import { ResultCard } from './components/ResultCard';
-import { ANALYZE_ENDPOINT, HEALTH_ENDPOINT, RECORDING_DURATION_MS, API_PORT } from './config';
+import {
+  ANALYZE_ENDPOINT,
+  HEALTH_ENDPOINT,
+  RECORDING_DURATION_MS,
+  API_PORT,
+  API_KEY,
+} from './config';
 import { fetchWithRetry } from './utils/api';
 import type { AnalysisResult, AppState } from './types';
 
@@ -153,8 +159,14 @@ function App() {
           const formData = new FormData();
           formData.append('file', audioBlob, 'sample.webm');
 
+          const headers: Record<string, string> = {};
+          if (API_KEY) {
+            headers['X-API-Key'] = API_KEY;
+          }
+
           const response = await fetchWithRetry(ANALYZE_ENDPOINT, {
             method: 'POST',
+            headers,
             body: formData,
           });
 
