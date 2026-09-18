@@ -25,3 +25,5 @@ services:
         value: 100
       - key: SICA_CACHE_TTL
         value: 3600
+      - key: SICA_API_KEY
+        value: "1"
