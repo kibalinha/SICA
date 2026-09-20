@@ -211,7 +211,9 @@ def _silence_guard(y: np.ndarray, sr: int) -> tuple[bool, dict[str, float]]:
 
     rms = float(np.sqrt(np.mean(np.square(y))))
     peak = float(np.max(np.abs(y)))
-    if rms <= 1e-4 and peak <= 1e-4:
+    # Threshold increased from 1e-4 to 0.005 to handle real-world microphone noise floors
+    # Typical quiet room microphone noise: RMS ~0.001-0.005
+    if rms <= 0.005 and peak <= 0.01:
         return True, {"music": 0.0, "speech": 0.0, "ambient_noise": 100.0}
 
     return False, {"music": 0.0, "speech": 0.0, "ambient_noise": 0.0}
@@ -225,7 +227,8 @@ def _compute_heuristic_probabilities(y: np.ndarray, sr: int) -> dict[str, float]
         return {"music": 0.0, "speech": 0.0, "ambient_noise": 100.0}
 
     rms = float(np.sqrt(np.mean(np.square(y))))
-    if rms <= 1e-4:
+    # Threshold increased from 1e-4 to 0.005 to handle real-world microphone noise floors
+    if rms <= 0.005:
         return {"music": 0.0, "speech": 0.0, "ambient_noise": 100.0}
 
     stft = librosa.stft(y, n_fft=2048, hop_length=512)
