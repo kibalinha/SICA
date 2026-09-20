@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Any, cast
 
 import librosa
@@ -11,6 +12,30 @@ logger = logging.getLogger(__name__)
 
 MAX_DURATION_SECONDS = 30.0
 MIN_DURATION_SECONDS = 0.5
+FAST_ANALYSIS_ENABLED = os.getenv("SICA_FAST_ANALYSIS", "true").lower() == "true"
+
+
+def _get_analysis_window_config(
+    duration_seconds: float, sample_rate: int, fast_mode: bool | None = None
+) -> dict[str, int]:
+    """Retorna janela e passo mais leves em ambientes de CPU limitada."""
+    if fast_mode is None:
+        fast_mode = FAST_ANALYSIS_ENABLED or duration_seconds >= 3.5
+
+    if fast_mode:
+        window_size = max(1024, int(sample_rate * 1.0))
+        hop_size = window_size
+        max_windows = 2
+    else:
+        window_size = int(sample_rate * 3.0)
+        hop_size = int(sample_rate * 1.5)
+        max_windows = 8
+
+    return {
+        "window_size": min(window_size, max(1024, int(sample_rate * 3.0))),
+        "hop_size": hop_size,
+        "max_windows": max_windows,
+    }
 
 
 def a_weighting_curve(frequencies: list[float] | np.ndarray) -> np.ndarray:
@@ -443,18 +468,24 @@ def process_audio_file(file_path: str) -> dict[str, Any]:
 
     logger.debug(f"Áudio carregado: {duration:.2f}s, {sr}Hz, {len(y)} amostras")
 
-    window_size = int(sr * 3.0)
-    hop_size = int(sr * 1.5)
+    window_cfg = _get_analysis_window_config(duration, sr)
+    window_size = window_cfg["window_size"]
+    hop_size = window_cfg["hop_size"]
+    max_windows = window_cfg["max_windows"]
     if len(y) < window_size:
         window_size = len(y)
         hop_size = max(1, len(y) // 3)
 
+    ai_engine = get_ai_engine()
     windows = []
+    processed_windows = 0
     for start in range(0, len(y) - window_size + 1, hop_size):
+        if processed_windows >= max_windows:
+            break
         segment = y[start : start + window_size]
         if len(segment) < window_size * 0.5:
             continue
-        ai_engine = get_ai_engine()
+        processed_windows += 1
         ai_result = ai_engine.analyze_soundscape(segment, sr)
         music_prob = ai_result["probabilities"]["music"]
         speech_prob = ai_result["probabilities"]["speech"]

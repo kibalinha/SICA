@@ -1,10 +1,19 @@
 import numpy as np
 
 from audio_processor import (
+    _get_analysis_window_config,
     a_weighting_curve,
     compute_volume_recommendation,
     summarize_windowed_analysis,
 )
+
+
+class TestFastAnalysisConfig:
+    def test_fast_mode_uses_lighter_windowing(self):
+        cfg = _get_analysis_window_config(22050 * 5, 22050, fast_mode=True)
+        assert cfg["window_size"] <= int(22050 * 1.5)
+        assert cfg["hop_size"] == cfg["window_size"]
+        assert cfg["max_windows"] == 2
 
 
 class TestAWeightingCurve:
