@@ -284,8 +284,87 @@ def _compute_heuristic_probabilities(y: np.ndarray, sr: int) -> dict[str, float]
         and bass_ratio > 0.15  # Pink noise has significant sub-bass energy
     )
 
+    # Harmonic series detector: checks if low_mid peaks have harmonics in speech band
+    # Voice has fundamental + integer multiples; music bass typically doesn't
+    def _detect_harmonic_series(mag: np.ndarray, freqs: np.ndarray, low_mid_mask: np.ndarray, speech_mask: np.ndarray) -> float:
+        """Returns confidence (0-1) that low_mid energy is part of harmonic series extending to speech band."""
+        mean_mag = np.mean(mag, axis=1)
+        low_mid_freqs = freqs[low_mid_mask]
+        low_mid_mags = mean_mag[low_mid_mask]
+        speech_freqs = freqs[speech_mask]
+        speech_mags = mean_mag[speech_mask]
+        
+        if len(low_mid_freqs) == 0 or len(speech_freqs) == 0:
+            return 0.0
+        
+        # Find peaks in low_mid band (potential fundamentals)
+        from scipy.signal import find_peaks
+        lm_peaks, _ = find_peaks(low_mid_mags, height=np.max(low_mid_mags) * 0.15, distance=5)
+        if len(lm_peaks) == 0:
+            return 0.0
+        
+        # Find peaks in speech band
+        sp_peaks, _ = find_peaks(speech_mags, height=np.max(speech_mags) * 0.1, distance=10)
+        if len(sp_peaks) == 0:
+            return 0.0
+        
+        sp_peak_freqs = speech_freqs[sp_peaks]
+        sp_peak_mags = speech_mags[sp_peaks]
+        
+        harmonic_matches = 0
+        total_fundamentals = 0
+        
+        for lm_idx in lm_peaks:
+            f0 = low_mid_freqs[lm_idx]
+            if f0 < 80 or f0 > 300:  # Only check voice-range fundamentals
+                continue
+            total_fundamentals += 1
+            
+            # Check for harmonics at 2*f0, 3*f0, 4*f0, 5*f0 in speech band
+            for h in range(2, 6):
+                expected_freq = f0 * h
+                if expected_freq > 2500:
+                    break
+                # Find closest speech peak
+                idx = np.argmin(np.abs(sp_peak_freqs - expected_freq))
+                if idx < len(sp_peak_freqs):
+                    freq_error = abs(sp_peak_freqs[idx] - expected_freq) / expected_freq
+                    if freq_error < 0.05:  # Within 5% of expected harmonic
+                        harmonic_matches += 1
+                        break  # Count each fundamental once
+        
+        if total_fundamentals == 0:
+            return 0.0
+        
+        return min(1.0, harmonic_matches / max(1, total_fundamentals))
+
+    harmonic_series_confidence = _detect_harmonic_series(mag, freqs, low_mid_mask, speech_mask)
+
+    # Pitch detection: voice fundamentals are in 75-400Hz range
+    # A clear pitch in this range + syllabic modulation = strong voice indicator
+    # NOTE: pitch WITHOUT modulation = sustained music note, NOT voice
+    voice_pitch_confidence = 0.0
+    try:
+        f0, voiced_flag, voiced_probs = librosa.pyin(
+            y, fmin=75, fmax=400, sr=sr, frame_length=2048
+        )
+        f0_valid = f0[~np.isnan(f0)]
+        if len(f0_valid) > 0:
+            # Clear, stable pitch in voice range detected
+            pitch_mean = float(np.mean(f0_valid))
+            pitch_ratio = float(len(f0_valid) / max(1, len(f0)))
+            # Voice pitch range: 75-400Hz (male ~85-180, female ~165-255)
+            # Only counts as voice when combined with syllabic modulation
+            if 75.0 <= pitch_mean <= 400.0:
+                voice_pitch_confidence = float(
+                    np.clip(pitch_ratio * speech_modulation * 1.5, 0.0, 1.0)
+                )
+    except Exception:
+        voice_pitch_confidence = 0.0
+
     # Music score: uses low_mid_ratio for bass instruments
     # Strong penalty when speech modulation is high (voice-like)
+    # Additional penalty when harmonic series detected (voice fundamentals)
     music_score = np.clip(
         0.08
         + low_mid_ratio * 0.9
@@ -294,6 +373,8 @@ def _compute_heuristic_probabilities(y: np.ndarray, sr: int) -> dict[str, float]
         + music_stability * 0.7
         - speech_modulation * 1.3
         - voiced_band_ratio * 0.6
+        - harmonic_series_confidence * 0.8  # Strong penalty for voice-like harmonic series
+        - voice_pitch_confidence * 0.9  # Strong penalty when voice-range pitch detected
         - (0.5 if is_pink_noise else 0.0),
         0.0,
         1.0,
@@ -306,6 +387,7 @@ def _compute_heuristic_probabilities(y: np.ndarray, sr: int) -> dict[str, float]
         + centroid_bias * 1.0
         + speech_modulation * 2.0
         + max(0.0, 1.0 - low_mid_ratio) * 0.5
+        + voice_pitch_confidence * 1.2  # Boost when voice-range pitch detected
         - music_stability * 0.5
         - (0.5 if is_pink_noise else 0.0),
         0.0,
@@ -427,10 +509,37 @@ class PannsEngine:
             modulation = 0.0
 
         strong_noise = flatness > 0.35 and high_ratio > 0.35 and modulation < 0.18
+        # Strong voice: syllabic modulation + voiced content
+        # Path 1: classic voice signature (modulation + speech-band energy)
+        # Path 2: very strong syllabic modulation + harmonic content (voice fundamentals in low bands)
+        # Path 3: pitch detected in voice range (75-400Hz) only when it is accompanied by speech-like modulation
+        voice_pitch_detected = False
+        modulated_voice_pitch = False
+        try:
+            f0_track, voiced_flags, _ = librosa.pyin(
+                y, fmin=75, fmax=400, sr=PANNS_SAMPLE_RATE, frame_length=2048
+            )
+            f0_valid = f0_track[~np.isnan(f0_track)]
+            if len(f0_valid) > 0:
+                pitch_mean = float(np.mean(f0_valid))
+                pitch_ratio = float(len(f0_valid) / max(1, len(f0_track)))
+                if 75.0 <= pitch_mean <= 400.0 and pitch_ratio > 0.3:
+                    voice_pitch_detected = True
+                    if modulation > 0.12:
+                        modulated_voice_pitch = True
+        except Exception:
+            voice_pitch_detected = False
+            modulated_voice_pitch = False
+
         strong_voice = (
             modulation > 0.22
             and centroid < 2500.0
-            and (speech_ratio > 0.08 or speech_energy > low_mid_energy * 0.14)
+            and (
+                speech_ratio > 0.08
+                or speech_energy > low_mid_energy * 0.14
+                or (modulation > 0.35 and harmonicity > 0.85)  # Strong modulation + harmonic = voice
+                or modulated_voice_pitch  # Clear pitch in voice range only when modulated
+            )
         )
         strong_music = (
             low_mid_ratio > 0.45
@@ -439,6 +548,7 @@ class PannsEngine:
             and harmonicity > 0.85
             and centroid < 1200.0
             and not strong_voice
+            and not modulated_voice_pitch  # Stable music pitch without speech modulation stays music
         )
 
         if strong_noise:

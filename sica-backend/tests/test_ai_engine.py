@@ -84,6 +84,7 @@ class TestPannsEngine:
         "scenario, expected_label, minimum_score",
         [
             ("music_only", "music", 40.0),
+            ("music_stable_pitch", "music", 40.0),
             ("voice_only", "speech", 40.0),
             ("noise_only", "ambient_noise", 45.0),
             ("music_noise", "music", 30.0),
@@ -98,6 +99,13 @@ class TestPannsEngine:
         rng = np.random.default_rng(42)
 
         if scenario == "music_only":
+            y = (
+                np.sin(2 * np.pi * 220 * t) * 0.7
+                + np.sin(2 * np.pi * 330 * t) * 0.4
+                + np.sin(2 * np.pi * 440 * t) * 0.3
+            )
+            y *= 0.7
+        elif scenario == "music_stable_pitch":
             y = (
                 np.sin(2 * np.pi * 220 * t) * 0.7
                 + np.sin(2 * np.pi * 330 * t) * 0.4
