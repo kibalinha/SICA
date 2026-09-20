@@ -243,9 +243,14 @@ def _compute_heuristic_probabilities(y: np.ndarray, sr: int) -> dict[str, float]
     speech_modulation = float(np.clip((modulation - 0.08) / 0.45, 0.0, 1.0))
     music_stability = float(np.clip(1.0 - modulation / 0.5, 0.0, 1.0))
 
-    bass_mask = (freqs >= 20) & (freqs <= 250)
-    low_mid_mask = (freqs > 250) & (freqs <= 800)
-    speech_mask = (freqs > 80) & (freqs <= 2500)
+    # Non-overlapping frequency bands to avoid double-counting voice fundamentals
+    # bass: 20-100Hz (sub-bass only)
+    # low_mid: 100-300Hz (bass instruments, voice fundamentals)
+    # speech: 300-2500Hz (voice formants, harmonics)
+    # high: 2500-12000Hz (high frequencies)
+    bass_mask = (freqs >= 20) & (freqs < 100)
+    low_mid_mask = (freqs >= 100) & (freqs < 300)
+    speech_mask = (freqs >= 300) & (freqs <= 2500)
     high_mask = (freqs > 2500) & (freqs <= 12000)
 
     bass_energy = float(np.mean(mag[bass_mask] ** 2)) if np.any(bass_mask) else 0.0
@@ -259,30 +264,38 @@ def _compute_heuristic_probabilities(y: np.ndarray, sr: int) -> dict[str, float]
     speech_ratio = speech_energy / total_energy
     high_ratio = high_energy / total_energy
 
-    voiced_band_ratio = float(np.clip((speech_energy / (low_mid_energy + bass_energy + 1e-8)) * 1.2, 0.0, 1.0))
+    # Voiced band ratio: speech energy vs low-mid (voice fundamentals) energy
+    # Voice energy includes both fundamentals (low_mid) and formants (speech)
+    voice_energy = low_mid_energy + speech_energy
+    voice_ratio = voice_energy / total_energy
+    
+    # Voiced band ratio: voice energy (fundamentals + formants) vs bass-only energy
+    voiced_band_ratio = float(np.clip((voice_energy / (bass_energy + 1e-8)) * 0.5, 0.0, 1.0))
     centroid_bias = float(np.clip(1.0 - abs(centroid - 900.0) / 2600.0, 0.0, 1.0))
     harmonicity = float(np.clip(1.0 - flatness, 0.0, 1.0))
 
+    # Music score: uses low_mid_ratio for bass instruments
+    # Strong penalty when speech modulation is high (voice-like)
     music_score = np.clip(
-        0.12
-        + bass_ratio * 1.2
-        + low_mid_ratio * 0.7
-        + harmonicity * 1.5
-        + min(centroid / 2000.0, 1.0) * 0.45
+        0.08
+        + low_mid_ratio * 0.9
+        + harmonicity * 1.0
+        + min(centroid / 2000.0, 1.0) * 0.3
         + music_stability * 0.7
-        - speech_modulation * 0.8
-        - voiced_band_ratio * 0.4,
+        - speech_modulation * 1.3
+        - voiced_band_ratio * 0.6,
         0.0,
         1.0,
     )
+    # Speech score: boosted by voice_ratio (fundamentals + formants), speech_modulation
     speech_score = np.clip(
-        0.08
-        + speech_ratio * 2.1
-        + voiced_band_ratio * 1.4
+        0.10
+        + voice_ratio * 2.0
+        + voiced_band_ratio * 1.5
         + centroid_bias * 1.0
-        + speech_modulation * 1.5
-        + max(0.0, 1.0 - bass_ratio) * 0.7
-        - music_stability * 0.4,
+        + speech_modulation * 2.0
+        + max(0.0, 1.0 - low_mid_ratio) * 0.5
+        - music_stability * 0.5,
         0.0,
         1.0,
     )
@@ -290,8 +303,8 @@ def _compute_heuristic_probabilities(y: np.ndarray, sr: int) -> dict[str, float]
         0.12
         + flatness * 2.1
         + high_ratio * 1.5
-        + max(0.0, 0.55 - speech_ratio) * 0.9
-        + max(0.0, 0.55 - bass_ratio) * 0.7,
+        + max(0.0, 0.55 - voice_ratio) * 0.9
+        + max(0.0, 0.55 - low_mid_ratio) * 0.7,
         0.0,
         1.0,
     )
@@ -374,9 +387,10 @@ class PannsEngine:
         flatness = float(np.mean(librosa.feature.spectral_flatness(S=mag)))
         centroid = float(np.mean(librosa.feature.spectral_centroid(y=y, sr=PANNS_SAMPLE_RATE)))
 
-        bass_mask = (freqs >= 20) & (freqs <= 250)
-        low_mid_mask = (freqs > 250) & (freqs <= 800)
-        speech_mask = (freqs > 80) & (freqs <= 2500)
+        # Non-overlapping frequency bands (matching heuristic)
+        bass_mask = (freqs >= 20) & (freqs < 100)
+        low_mid_mask = (freqs >= 100) & (freqs < 300)
+        speech_mask = (freqs >= 300) & (freqs <= 2500)
         high_mask = (freqs > 2500) & (freqs <= 12000)
 
         bass_energy = float(np.mean(mag[bass_mask] ** 2)) if np.any(bass_mask) else 0.0
@@ -403,10 +417,10 @@ class PannsEngine:
         strong_voice = (
             modulation > 0.22
             and centroid < 2500.0
-            and (speech_ratio > 0.08 or speech_energy > bass_energy * 0.14)
+            and (speech_ratio > 0.08 or speech_energy > low_mid_energy * 0.14)
         )
         strong_music = (
-            bass_ratio > 0.55
+            low_mid_ratio > 0.45
             and modulation < 0.14
             and flatness < 0.12
             and harmonicity > 0.85
