@@ -1,14 +1,2 @@
-__pycache__/
-*.py[cod]
-*.pyo
-.venv/
-venv/
-.env
-.env.local
-*.pt
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-*.egg-info/
-dist/
-build/
+sica_backend.log
+test_*.py

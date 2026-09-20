@@ -13,8 +13,11 @@ sica-backend/   → API FastAPI + librosa + PyTorch
 
 ### Backend
 - ✅ API FastAPI com documentação automática (/api/v1/docs)
-- ✅ Motor de IA CNN PyTorch para classificação de áudio
+- ✅ Motor de IA CNN PyTorch para classificação de áudio (PANNs Cnn14 / AudioSet)
 - ✅ Processamento espectral (STFT, HPSS)
+- ✅ Loudness LUFS (EBU R128, K-weighting) via pyloudnorm
+- ✅ Score de musicalidade (onsets, BPM, spectral rolloff)
+- ✅ Suavização temporal EMA entre janelas
 - ✅ Validação de arquivos e sanitização
 - ✅ Rate limiting com slowapi
 - ✅ Logging estruturado em JSON
@@ -128,8 +131,8 @@ curl -X POST http://localhost:8002/api/v1/analyze \
 2. **STFT** — Transformada de Fourier de tempo curto
 3. **HPSS** — Separação harmônica vs percussiva/ruído
 4. **IA** — PANNs Cnn14 (AudioSet, 527 classes) em PyTorch, com fallback heurístico (música / voz / ruído)
-5. **Métricas** — dB(A), SNR, planicidade espectral
-6. **Recomendação** — Ajuste de volume ±6 dB com base no SNR alvo
+5. **Métricas** — dB(A), LUFS (EBU R128, K-weighting), SNR, planicidade espectral, score de musicalidade (onsets/BPM/rolloff)
+6. **Recomendação** — Ajuste de volume ±6 dB com base no SNR alvo, LUFS e classificação semântica
 
 ## Testes
 

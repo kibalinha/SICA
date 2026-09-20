@@ -93,19 +93,14 @@ class TestPannsEngine:
             ("all_three", "speech", 25.0),
         ],
     )
-    def test_various_realistic_audio_scenarios(self, engine, scenario, expected_label, minimum_score):
+    def test_various_realistic_audio_scenarios(
+        self, engine, scenario, expected_label, minimum_score
+    ):
         sr = 22050
         t = np.linspace(0, 1.0, sr, endpoint=False)
         rng = np.random.default_rng(42)
 
-        if scenario == "music_only":
-            y = (
-                np.sin(2 * np.pi * 220 * t) * 0.7
-                + np.sin(2 * np.pi * 330 * t) * 0.4
-                + np.sin(2 * np.pi * 440 * t) * 0.3
-            )
-            y *= 0.7
-        elif scenario == "music_stable_pitch":
+        if scenario == "music_only" or scenario == "music_stable_pitch":
             y = (
                 np.sin(2 * np.pi * 220 * t) * 0.7
                 + np.sin(2 * np.pi * 330 * t) * 0.4

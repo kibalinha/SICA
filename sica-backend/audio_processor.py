@@ -13,6 +13,89 @@ logger = logging.getLogger(__name__)
 MAX_DURATION_SECONDS = 30.0
 MIN_DURATION_SECONDS = 0.5
 FAST_ANALYSIS_ENABLED = os.getenv("SICA_FAST_ANALYSIS", "true").lower() == "true"
+# EMA aplicada às probabilidades do modelo entre janelas temporais (0 = nenhuma suavização)
+EMA_ALPHA = float(os.getenv("SICA_EMA_ALPHA", "0.6"))
+# Peso do score de musicalidade na recomendação (0 = desligado)
+MUSIC_SCORE_WEIGHT = float(os.getenv("SICA_MUSIC_SCORE_WEIGHT", "0.25"))
+
+
+def compute_loudness_lufs(y: np.ndarray, sr: int) -> float:
+    """Loudness integrada em LUFS (K-weighting, EBU R128) via pyloudnorm.
+
+    Mais preciso que a estimativa de dB(A) por RMS: pondera em K (loudness
+    perceptual) e aplica gating de silêncio (-70 LUFS) como a norma exige.
+    """
+    try:
+        import pyloudnorm  # type: ignore
+    except ImportError:
+        logger.warning("pyloudnorm indisponível; usando dB(A) por RMS como substituto.")
+        return -70.0
+
+    try:
+        meter = pyloudnorm.Meter(sr, block_size=int(sr * 0.4))
+        y_f = np.asarray(y, dtype=np.float32)
+        if y_f.ndim > 1:
+            y_f = y_f.mean(axis=0)
+        if y_f.size == 0:
+            return -70.0
+        # pyloudnorm exige ao menos um bloco completo; completa com silêncio se necessário
+        block_size = int(sr * 0.4)
+        if y_f.size < block_size:
+            y_f = np.pad(y_f, (0, block_size - y_f.size), mode="constant")
+        loudness = float(meter.integrated_loudness(y_f))
+        if not np.isfinite(loudness):
+            return -70.0
+        return round(max(-70.0, min(0.0, loudness)), 1)
+    except Exception as exc:
+        logger.warning("Falha ao calcular LUFS: %s", exc)
+        return -70.0
+
+
+def compute_music_score(y: np.ndarray, sr: int) -> float:
+    """Escores de musicalidade robustos (0-100) combinando onsets, tempo e planicidade.
+
+    A heurística atual de música (flatness < 0.25 e rms harmônico) é fraca para
+    trilhas com percussão ou ruído de fundo. Este score combina:
+    - densidade de onset (eventos rítmicos)
+    - BPM normalizado (música tem ritmo estruturado)
+    - planicidade espectral invertida (música tem estrutura harmônica)
+    - rolloff espectral (brilho = instrumentos)
+    """
+    if y.size == 0:
+        return 0.0
+
+    onset_strength = librosa.onset.onset_strength(y=y, sr=sr)
+    onset_frames = librosa.onset.onset_detect(onset_envelope=onset_strength, sr=sr)
+    onset_density = min(
+        1.0, len(onset_frames) / max(1, int(librosa.get_duration(y=y, sr=sr)) * 2.0)
+    )
+
+    try:
+        tempo, _ = librosa.beat.beat_track(onset_envelope=onset_strength, sr=sr)
+        tempo_norm = min(1.0, float(tempo) / 160.0)
+    except Exception:
+        tempo_norm = 0.0
+
+    stft = librosa.stft(y, n_fft=2048, hop_length=512)
+    mag, _ = librosa.magphase(stft)
+    flatness = float(np.mean(librosa.feature.spectral_flatness(S=mag)))
+    rolloff = float(np.mean(librosa.feature.spectral_rolloff(S=mag, sr=sr)))
+    rolloff_norm = min(1.0, rolloff / (sr / 2.0))
+
+    score = 0.15 * onset_density + 0.25 * tempo_norm + 0.40 * (1.0 - flatness) + 0.20 * rolloff_norm
+    return round(float(np.clip(score, 0.0, 1.0)) * 100.0, 1)
+
+
+def _ema_smooth(values: list[float], alpha: float) -> list[float]:
+    """Suavização exponencial decrescente (EMA) ao longo do tempo."""
+    if not values:
+        return []
+    smoothed: list[float] = []
+    prev = values[0]
+    for value in values:
+        prev = alpha * value + (1.0 - alpha) * prev
+        smoothed.append(round(prev, 1))
+    return smoothed
 
 
 def _get_analysis_window_config(
@@ -102,18 +185,23 @@ def compute_volume_recommendation(
     total_dba: float = 0.0,
     peak_level: float = 0.0,
     harmonic_dba: float = 0.0,
-    band_dba: dict[str, float] = None,
+    band_dba: dict[str, float] | None = None,
+    music_score: float = 0.0,
+    lufs: float = -70.0,
     confidence: float = 0.0,
 ) -> tuple[int, str]:
+    """Calcula ajuste de volume recomendado com base em SNR, nível absoluto, LUFS e classificação semântica."""
     if band_dba is None:
         band_dba = {}
-    """Calcula ajuste de volume recomendado com base em SNR, nível absoluto e classificação semântica."""
     target_snr = 6.0
     diff_snr = target_snr - snr_db
 
-    if music_prob < 20.0 and speech_prob > 45.0:
+    # Musicalidade robusta: score de onset/tempo/rolloff complementa o PANNs
+    effective_music = max(music_prob, music_score * MUSIC_SCORE_WEIGHT * 100.0)
+
+    if music_score < 20.0 and speech_prob > 45.0:
         return 0, "Vozes humanas predominantes. Música ambiente não identificada; ajuste suspenso."
-    if music_prob < 15.0 and noise_prob > 50.0:
+    if music_score < 15.0 and noise_prob > 50.0:
         return 0, "Ruído mecânico/ambiente dominante sem detecção de música no sinal."
 
     suggested_adjustment = int(np.clip(np.round(diff_snr), -6, 6))
@@ -121,10 +209,16 @@ def compute_volume_recommendation(
     if peak_level > 0.90 and suggested_adjustment > 0:
         return 0, "Música muito alta perto do microfone; sinal próximo à saturação. Não aumentar."
 
-    if music_prob >= 50.0 and total_dba >= 82.0:
+    if effective_music >= 50.0 and total_dba >= 82.0:
         return (
             0,
             f"Música alta percebida ({total_dba:.0f} dBA). Volume já está elevado; não aumentar.",
+        )
+
+    if lufs > -23.0 and suggested_adjustment > 0:
+        return (
+            0,
+            f"Loudness integrada ({lufs:.0f} LUFS) já está em nível de radiodifusão. Não aumentar.",
         )
 
     if total_dba > 80.0 and suggested_adjustment > 0:
@@ -135,7 +229,7 @@ def compute_volume_recommendation(
 
     if (
         confidence > 0.7
-        and music_prob > 50.0
+        and effective_music > 50.0
         and 68.0 <= total_dba <= 78.0
         and suggested_adjustment > 0
     ):
@@ -149,28 +243,43 @@ def compute_volume_recommendation(
         # Check for excessive sub-bass (HVAC rumble, structural vibrations)
         sub_bass_level = band_dba.get("sub-bass", -np.inf)
         if sub_bass_level > 65.0 and suggested_adjustment > 0:
-            return 0, f"Excesso de graves (sub-bass: {sub_bass_level:.0f} dBA) possivelmente de HVAC/vibrações. Tratar fonte antes de aumentar volume."
-        
+            return (
+                0,
+                f"Excesso de graves (sub-bass: {sub_bass_level:.0f} dBA) possivelmente de HVAC/vibrações. Tratar fonte antes de aumentar volume.",
+            )
+
         # Check for bass-heavy content that might mask vocals
         bass_level = band_dba.get("bass", -np.inf)
         low_mid_level = band_dba.get("low-mid", -np.inf)
         if bass_level > 70.0 and low_mid_level < 55.0 and music_prob > 40.0:
-            return 0, f"Ênfase excessiva em graves (bass: {bass_level:.0f} dBA) pode estar mascarando médias. Considerar equalização antes de ajustar volume."
-        
+            return (
+                0,
+                f"Ênfase excessiva em graves (bass: {bass_level:.0f} dBA) pode estar mascarando médias. Considerar equalização antes de ajustar volume.",
+            )
+
         # Check for harsh upper-mid frequencies (vocal fatigue risk)
         upper_mid_level = band_dba.get("upper-mid", -np.inf)
         if upper_mid_level > 75.0 and suggested_adjustment > 0:
-            return 0, f"Frequências upper-mid altas ({upper_mid_level:.0f} dBA) podem causar fadiga vocal. Reduzir 2-4 dB nesta faixa antes de aumentar volume geral."
-        
+            return (
+                0,
+                f"Frequências upper-mid altas ({upper_mid_level:.0f} dBA) podem causar fadiga vocal. Reduzir 2-4 dB nesta faixa antes de aumentar volume geral.",
+            )
+
         # Check for brilliance/harshness in high frequencies
         high_level = band_dba.get("high", -np.inf)
         if high_level > 80.0 and suggested_adjustment > 0:
-            return 0, f"Excesso de brilho (high: {high_level:.0f} dBA) pode indicar sibilância ou harshness. Aplicar de-essing antes de aumentar volume."
-        
+            return (
+                0,
+                f"Excesso de brilho (high: {high_level:.0f} dBA) pode indicar sibilância ou harshness. Aplicar de-essing antes de aumentar volume.",
+            )
+
         # Check for air band excess (can sound artificial/hissy)
         air_level = band_dba.get("air", -np.inf)
         if air_level > 70.0 and air_level > (band_dba.get("high", -np.inf) + 5):
-            return 0, f"Excesso de ar ({air_level:.0f} dBA) pode indicar ruído artificial ou compressão excessiva. Verificar cadeia de sinal."
+            return (
+                0,
+                f"Excesso de ar ({air_level:.0f} dBA) pode indicar ruído artificial ou compressão excessiva. Verificar cadeia de sinal.",
+            )
 
     if (
         music_prob >= 35.0
@@ -249,6 +358,8 @@ def summarize_windowed_analysis(window_results: list[dict[str, Any]]) -> dict[st
                 "noise_dba": 0.0,
                 "snr_db": 0.0,
                 "spectral_flatness": 0.0,
+                "lufs": -70.0,
+                "music_score": 0.0,
                 "is_music_detected": False,
             },
             "recommendation": {
@@ -311,6 +422,8 @@ def summarize_windowed_analysis(window_results: list[dict[str, Any]]) -> dict[st
                 "noise_dba": 0.0,
                 "snr_db": 0.0,
                 "spectral_flatness": 0.0,
+                "lufs": -70.0,
+                "music_score": 0.0,
                 "is_music_detected": False,
             },
             "recommendation": {
@@ -349,12 +462,24 @@ def summarize_windowed_analysis(window_results: list[dict[str, Any]]) -> dict[st
     avg_speech = float(np.mean(speech_probs)) if speech_probs else 0.0
     avg_noise = float(np.mean(noise_probs)) if noise_probs else 0.0
 
+    # Suavização temporal (EMA) para evitar oscilações bruscas entre janelas
+    music_probs_smoothed = _ema_smooth(music_probs, EMA_ALPHA)
+    speech_probs_smoothed = _ema_smooth(speech_probs, EMA_ALPHA)
+    noise_probs_smoothed = _ema_smooth(noise_probs, EMA_ALPHA)
+    avg_music = float(np.mean(music_probs_smoothed)) if music_probs_smoothed else 0.0
+    avg_speech = float(np.mean(speech_probs_smoothed)) if speech_probs_smoothed else 0.0
+    avg_noise = float(np.mean(noise_probs_smoothed)) if noise_probs_smoothed else 0.0
+
     total_dba = float(np.mean([item["metrics"]["total_dba"] for item in normalized_windows]))
     harmonic_dba = float(
         np.mean([item["metrics"]["harmonic_music_dba"] for item in normalized_windows])
     )
     noise_dba = float(np.mean([item["metrics"]["noise_dba"] for item in normalized_windows]))
     snr_db = float(np.mean([item["metrics"]["snr_db"] for item in normalized_windows]))
+    lufs_values = [item["metrics"].get("lufs", -70.0) for item in normalized_windows]
+    lufs = float(np.mean(lufs_values)) if lufs_values else -70.0
+    music_scores = [item["metrics"].get("music_score", 0.0) for item in normalized_windows]
+    music_score = float(np.mean(music_scores)) if music_scores else 0.0
     peak_level = (
         float(np.max([item["metrics"]["total_dba"] for item in normalized_windows])) / 100.0
     )
@@ -372,7 +497,8 @@ def summarize_windowed_analysis(window_results: list[dict[str, Any]]) -> dict[st
             band_values = [
                 item["metrics"]["band_dba"][band_label]
                 for item in normalized_windows
-                if "band_dba" in item["metrics"] and item["metrics"]["band_dba"][band_label] != -np.inf
+                if "band_dba" in item["metrics"]
+                and item["metrics"]["band_dba"][band_label] != -np.inf
             ]
             if band_values:
                 band_dba_agg[band_label] = float(np.mean(band_values))
@@ -381,7 +507,7 @@ def summarize_windowed_analysis(window_results: list[dict[str, Any]]) -> dict[st
     else:
         # Default values if no band_dba data
         band_labels = ["sub-bass", "bass", "low-mid", "mid", "upper-mid", "high", "air"]
-        band_dba_agg = {label: -np.inf for label in band_labels}
+        band_dba_agg = dict.fromkeys(band_labels, -np.inf)
 
     recommendation_adjustment, recommendation_status = compute_volume_recommendation(
         avg_music,
@@ -391,6 +517,8 @@ def summarize_windowed_analysis(window_results: list[dict[str, Any]]) -> dict[st
         total_dba=total_dba,
         peak_level=peak_level,
         harmonic_dba=harmonic_dba,
+        music_score=music_score,
+        lufs=lufs,
         confidence=confidence,
     )
 
@@ -423,7 +551,9 @@ def summarize_windowed_analysis(window_results: list[dict[str, Any]]) -> dict[st
                 ),
                 4,
             ),
-            "is_music_detected": avg_music >= 35.0,
+            "lufs": round(lufs, 1),
+            "music_score": round(music_score, 1),
+            "is_music_detected": avg_music >= 35.0 or music_score >= 35.0,
             "band_dba": band_dba_agg,
         },
         "recommendation": {
@@ -518,15 +648,15 @@ def process_audio_file(file_path: str) -> dict[str, Any]:
 
         # Calculate dBA per frequency band for more precise recommendations
         frequency_bands = [
-            (20, 100, "sub-bass"),      # HVAC, structural vibrations
-            (100, 300, "bass"),         # Bass instruments, kick drum
-            (300, 800, "low-mid"),      # Male vocals, body of instruments
-            (800, 2000, "mid"),         # Vocal clarity, mid-range instruments
+            (20, 100, "sub-bass"),  # HVAC, structural vibrations
+            (100, 300, "bass"),  # Bass instruments, kick drum
+            (300, 800, "low-mid"),  # Male vocals, body of instruments
+            (800, 2000, "mid"),  # Vocal clarity, mid-range instruments
             (2000, 4000, "upper-mid"),  # Presence, consonant articulation
-            (4000, 8000, "high"),       # Brilliance, percussion details
-            (8000, 20000, "air")        # Airiness, upper harmonics
+            (4000, 8000, "high"),  # Brilliance, percussion details
+            (8000, 20000, "air"),  # Airiness, upper harmonics
         ]
-        
+
         band_dba = {}
         for low_freq, high_freq, band_label in frequency_bands:
             # Find frequency indices within this band
@@ -535,18 +665,21 @@ def process_audio_file(file_path: str) -> dict[str, Any]:
                 # Extract magnitude and frequencies for this band
                 band_mag = spectrogram_mag[freq_mask, :]
                 band_freqs = freqs[freq_mask]
-                
+
                 # Calculate time-averaged magnitude for the band
                 avg_band_mag = np.mean(band_mag, axis=1)
-                
+
                 # Apply A-weighting to the band frequencies
                 a_weights = a_weighting_curve(band_freqs)
-                
+
                 # Calculate weighted energy: sum of (magnitude^2 * A-weight)
-                weighted_energy = np.sum(avg_band_mag**2 * 10**(a_weights/10))
+                weighted_energy = np.sum(avg_band_mag**2 * 10 ** (a_weights / 10))
                 band_dba[band_label] = 10 * np.log10(weighted_energy + 1e-10)
             else:
                 band_dba[band_label] = -np.inf  # No energy in this band
+
+        lufs = compute_loudness_lufs(segment, sr)
+        music_score = compute_music_score(segment, sr)
 
         recommendation_adjustment, status_text = compute_volume_recommendation(
             music_prob,
@@ -557,6 +690,7 @@ def process_audio_file(file_path: str) -> dict[str, Any]:
             peak_level=peak_level,
             harmonic_dba=harmonic_dba,
             band_dba=band_dba,
+            music_score=music_score,
             confidence=ai_result["confidence"],
         )
 
@@ -568,8 +702,11 @@ def process_audio_file(file_path: str) -> dict[str, Any]:
                     "noise_dba": noise_dba,
                     "snr_db": snr_db,
                     "spectral_flatness": flatness,
+                    "lufs": lufs,
+                    "music_score": music_score,
                     "is_music_detected": music_prob >= 35.0
-                    or (flatness < 0.25 and rms_harmonic > 0.01),
+                    or (flatness < 0.25 and rms_harmonic > 0.01)
+                    or music_score >= 35.0,
                     "band_dba": band_dba,
                 },
                 "recommendation": {

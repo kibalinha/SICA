@@ -261,14 +261,14 @@ def _compute_heuristic_probabilities(y: np.ndarray, sr: int) -> dict[str, float]
 
     bass_ratio = bass_energy / total_energy
     low_mid_ratio = low_mid_energy / total_energy
-    speech_ratio = speech_energy / total_energy
+    speech_ratio = speech_energy / total_energy  # noqa: F841  (used in strong_voice below)
     high_ratio = high_energy / total_energy
 
     # Voiced band ratio: speech energy vs low-mid (voice fundamentals) energy
     # Voice energy includes both fundamentals (low_mid) and formants (speech)
     voice_energy = low_mid_energy + speech_energy
     voice_ratio = voice_energy / total_energy
-    
+
     # Voiced band ratio: voice energy (fundamentals + formants) vs bass-only energy
     voiced_band_ratio = float(np.clip((voice_energy / (bass_energy + 1e-8)) * 0.5, 0.0, 1.0))
     centroid_bias = float(np.clip(1.0 - abs(centroid - 900.0) / 2600.0, 0.0, 1.0))
@@ -286,40 +286,42 @@ def _compute_heuristic_probabilities(y: np.ndarray, sr: int) -> dict[str, float]
 
     # Harmonic series detector: checks if low_mid peaks have harmonics in speech band
     # Voice has fundamental + integer multiples; music bass typically doesn't
-    def _detect_harmonic_series(mag: np.ndarray, freqs: np.ndarray, low_mid_mask: np.ndarray, speech_mask: np.ndarray) -> float:
+    def _detect_harmonic_series(
+        mag: np.ndarray, freqs: np.ndarray, low_mid_mask: np.ndarray, speech_mask: np.ndarray
+    ) -> float:
         """Returns confidence (0-1) that low_mid energy is part of harmonic series extending to speech band."""
         mean_mag = np.mean(mag, axis=1)
         low_mid_freqs = freqs[low_mid_mask]
         low_mid_mags = mean_mag[low_mid_mask]
         speech_freqs = freqs[speech_mask]
         speech_mags = mean_mag[speech_mask]
-        
+
         if len(low_mid_freqs) == 0 or len(speech_freqs) == 0:
             return 0.0
-        
+
         # Find peaks in low_mid band (potential fundamentals)
         from scipy.signal import find_peaks
+
         lm_peaks, _ = find_peaks(low_mid_mags, height=np.max(low_mid_mags) * 0.15, distance=5)
         if len(lm_peaks) == 0:
             return 0.0
-        
+
         # Find peaks in speech band
         sp_peaks, _ = find_peaks(speech_mags, height=np.max(speech_mags) * 0.1, distance=10)
         if len(sp_peaks) == 0:
             return 0.0
-        
+
         sp_peak_freqs = speech_freqs[sp_peaks]
-        sp_peak_mags = speech_mags[sp_peaks]
-        
+
         harmonic_matches = 0
         total_fundamentals = 0
-        
+
         for lm_idx in lm_peaks:
             f0 = low_mid_freqs[lm_idx]
             if f0 < 80 or f0 > 300:  # Only check voice-range fundamentals
                 continue
             total_fundamentals += 1
-            
+
             # Check for harmonics at 2*f0, 3*f0, 4*f0, 5*f0 in speech band
             for h in range(2, 6):
                 expected_freq = f0 * h
@@ -332,10 +334,10 @@ def _compute_heuristic_probabilities(y: np.ndarray, sr: int) -> dict[str, float]
                     if freq_error < 0.05:  # Within 5% of expected harmonic
                         harmonic_matches += 1
                         break  # Count each fundamental once
-        
+
         if total_fundamentals == 0:
             return 0.0
-        
+
         return min(1.0, harmonic_matches / max(1, total_fundamentals))
 
     harmonic_series_confidence = _detect_harmonic_series(mag, freqs, low_mid_mask, speech_mask)
@@ -345,9 +347,7 @@ def _compute_heuristic_probabilities(y: np.ndarray, sr: int) -> dict[str, float]
     # NOTE: pitch WITHOUT modulation = sustained music note, NOT voice
     voice_pitch_confidence = 0.0
     try:
-        f0, voiced_flag, voiced_probs = librosa.pyin(
-            y, fmin=75, fmax=400, sr=sr, frame_length=2048
-        )
+        f0, _, _ = librosa.pyin(y, fmin=75, fmax=400, sr=sr, frame_length=2048)
         f0_valid = f0[~np.isnan(f0)]
         if len(f0_valid) > 0:
             # Clear, stable pitch in voice range detected
@@ -458,9 +458,28 @@ class PannsEngine:
         panns_probs = _categorize_panns_probs(probs, self.labels)
         heuristic_probs = _compute_heuristic_probabilities(y, PANNS_SAMPLE_RATE)
 
-        music_p = float(np.clip(0.5 * (panns_probs["music"] / 100.0) + 0.5 * (heuristic_probs["music"] / 100.0), 0.0, 1.0))
-        speech_p = float(np.clip(0.25 * (panns_probs["speech"] / 100.0) + 0.75 * (heuristic_probs["speech"] / 100.0), 0.0, 1.0))
-        noise_p = float(np.clip(0.45 * (panns_probs["ambient_noise"] / 100.0) + 0.55 * (heuristic_probs["ambient_noise"] / 100.0), 0.0, 1.0))
+        music_p = float(
+            np.clip(
+                0.5 * (panns_probs["music"] / 100.0) + 0.5 * (heuristic_probs["music"] / 100.0),
+                0.0,
+                1.0,
+            )
+        )
+        speech_p = float(
+            np.clip(
+                0.25 * (panns_probs["speech"] / 100.0) + 0.75 * (heuristic_probs["speech"] / 100.0),
+                0.0,
+                1.0,
+            )
+        )
+        noise_p = float(
+            np.clip(
+                0.45 * (panns_probs["ambient_noise"] / 100.0)
+                + 0.55 * (heuristic_probs["ambient_noise"] / 100.0),
+                0.0,
+                1.0,
+            )
+        )
 
         total = music_p + speech_p + noise_p
         if total > 0:
@@ -494,11 +513,10 @@ class PannsEngine:
         high_energy = float(np.mean(mag[high_mask] ** 2)) if np.any(high_mask) else 0.0
 
         total_energy = bass_energy + low_mid_energy + speech_energy + high_energy + 1e-8
-        bass_ratio = bass_energy / total_energy
+        bass_ratio = bass_energy / total_energy  # noqa: F841  (used in is_pink_noise below)
         low_mid_ratio = low_mid_energy / total_energy
         speech_ratio = speech_energy / total_energy
         high_ratio = high_energy / total_energy
-        harmonic_ratio = (bass_energy + low_mid_energy) / total_energy
         harmonicity = float(np.clip(1.0 - flatness, 0.0, 1.0))
 
         if np.any(np.abs(y)):
@@ -513,22 +531,18 @@ class PannsEngine:
         # Path 1: classic voice signature (modulation + speech-band energy)
         # Path 2: very strong syllabic modulation + harmonic content (voice fundamentals in low bands)
         # Path 3: pitch detected in voice range (75-400Hz) only when it is accompanied by speech-like modulation
-        voice_pitch_detected = False
         modulated_voice_pitch = False
         try:
-            f0_track, voiced_flags, _ = librosa.pyin(
+            f0_track, _, _ = librosa.pyin(
                 y, fmin=75, fmax=400, sr=PANNS_SAMPLE_RATE, frame_length=2048
             )
             f0_valid = f0_track[~np.isnan(f0_track)]
             if len(f0_valid) > 0:
                 pitch_mean = float(np.mean(f0_valid))
                 pitch_ratio = float(len(f0_valid) / max(1, len(f0_track)))
-                if 75.0 <= pitch_mean <= 400.0 and pitch_ratio > 0.3:
-                    voice_pitch_detected = True
-                    if modulation > 0.12:
-                        modulated_voice_pitch = True
+                if 75.0 <= pitch_mean <= 400.0 and pitch_ratio > 0.3 and modulation > 0.12:
+                    modulated_voice_pitch = True
         except Exception:
-            voice_pitch_detected = False
             modulated_voice_pitch = False
 
         strong_voice = (
@@ -537,7 +551,9 @@ class PannsEngine:
             and (
                 speech_ratio > 0.08
                 or speech_energy > low_mid_energy * 0.14
-                or (modulation > 0.35 and harmonicity > 0.85)  # Strong modulation + harmonic = voice
+                or (
+                    modulation > 0.35 and harmonicity > 0.85
+                )  # Strong modulation + harmonic = voice
                 or modulated_voice_pitch  # Clear pitch in voice range only when modulated
             )
         )

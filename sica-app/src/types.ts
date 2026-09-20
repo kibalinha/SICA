@@ -31,6 +31,8 @@ export interface AnalysisResult {
     spectral_flatness: number;
     is_music_detected: boolean;
     band_dba?: Record<string, number>;
+    lufs?: number;
+    music_score?: number;
   };
   recommendation: {
     adjustment_db: number;

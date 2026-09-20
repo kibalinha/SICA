@@ -121,6 +121,9 @@ delightful-galileo/
 - `SICA_CACHE_SIZE`: Tamanho máximo do cache (padrão: 100)
 - `SICA_CACHE_TTL`: Tempo de vida do cache em segundos (padrão: 3600)
 - `SICA_API_KEY`: API Key para autenticação (opcional)
+- `SICA_EMA_ALPHA`: Fator de suavização temporal EMA entre janelas (padrão: 0.6)
+- `SICA_MUSIC_SCORE_WEIGHT`: Peso do score de musicalidade na recomendação (padrão: 0.25)
+- `SICA_FAST_ANALYSIS`: Modo de janelas leves em ambientes de CPU limitada (padrão: true)
 
 #### Frontend (.env)
 - `VITE_API_URL`: URL base da API (vazio usa proxy do Vite em dev)

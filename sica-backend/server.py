@@ -151,8 +151,13 @@ def _parse_cors_origins() -> list[str]:
         return ["*"]
     origins = [origin.strip() for origin in raw.split(",") if origin.strip()]
     # Remove duplicates while preserving order
-    seen = set()
-    return [x for x in origins if not (x in seen or seen.add(x))]
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for x in origins:
+        if x not in seen:
+            seen.add(x)
+            deduped.append(x)
+    return deduped
 
 
 def _validate_environment() -> None:
@@ -170,10 +175,7 @@ def _validate_environment() -> None:
             if origin != "*" and not origin.startswith(("http://", "https://")):
                 logger.warning(
                     "config_warning",
-                    extra={
-                        "event": "SICA_CORS_ORIGINS contains invalid origin",
-                        "origin": origin
-                    },
+                    extra={"event": "SICA_CORS_ORIGINS contains invalid origin", "origin": origin},
                 )
     except Exception as e:
         logger.exception("env_validation_error", extra={"error": str(e)})
@@ -192,9 +194,7 @@ async def verify_api_key(api_key: str | None = Depends(_api_key_header)) -> None
     """Verifica API Key se configurada."""
     if API_KEY:
         if not api_key:
-            logger.warning(
-                "auth_failed", extra={"provided_key_prefix": "none"}
-            )
+            logger.warning("auth_failed", extra={"provided_key_prefix": "none"})
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="API Key ausente",

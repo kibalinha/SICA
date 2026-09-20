@@ -11,3 +11,4 @@ python-dotenv>=1.0.0
 slowapi>=0.1.9
 limits>=5.0.0
 psutil>=5.9.0
+pyloudnorm>=0.0.6

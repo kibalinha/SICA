@@ -12,40 +12,14 @@ describe('AudioVisualizer', () => {
   beforeEach(() => {
     mockGetByteFrequencyData.mockClear();
 
-    // Mock requestAnimationFrame
+    // jsdom não tem canvas 2d real: getContext('2d') retorna null,
+    // então o loop de desenho é pulado e o componente ainda deve renderizar.
     vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
-      return setTimeout(cb, 0);
+      return setTimeout(cb as () => void, 0) as unknown as number;
     });
     vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
       clearTimeout(id);
     });
-
-    // Mock HTMLCanvasElement and its getContext method
-    const mockCanvas = {
-      width: 300,
-      height: 150,
-      style: {},
-      getContext: vi.fn().mockReturnValue({
-        clearRect: vi.fn(),
-        fillRect: vi.fn(),
-        fillStyle: '',
-        setTransform: vi.fn()
-      }),
-      getBoundingClientRect: vi.fn().mockReturnValue({
-        width: 300,
-        height: 150,
-        left: 0,
-        top: 0,
-        right: 300,
-        bottom: 150
-      })
-    } as unknown as HTMLCanvasElement;
-    
-    // Mock document.createElement to return our canvas
-    vi.spyOn(document, 'createElement').mockReturnValue(mockCanvas);
-    
-    // Mock document.createElement to return our canvas
-    vi.spyOn(document, 'createElement').mockReturnValue(mockCanvas);
   });
 
   afterEach(() => {
