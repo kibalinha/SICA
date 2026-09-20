@@ -274,6 +274,16 @@ def _compute_heuristic_probabilities(y: np.ndarray, sr: int) -> dict[str, float]
     centroid_bias = float(np.clip(1.0 - abs(centroid - 900.0) / 2600.0, 0.0, 1.0))
     harmonicity = float(np.clip(1.0 - flatness, 0.0, 1.0))
 
+    # Pink noise detection: extremely low flatness + low modulation + low centroid + significant bass energy
+    # Pink noise has 1/f spectrum (very predictable, flatness ~0.001) but is stochastic
+    # Unlike singing/harmonic content which has energy concentrated at harmonics (low_mid/speech bands)
+    is_pink_noise = (
+        flatness < 0.005
+        and modulation < 0.2
+        and centroid < 1000.0
+        and bass_ratio > 0.15  # Pink noise has significant sub-bass energy
+    )
+
     # Music score: uses low_mid_ratio for bass instruments
     # Strong penalty when speech modulation is high (voice-like)
     music_score = np.clip(
@@ -283,7 +293,8 @@ def _compute_heuristic_probabilities(y: np.ndarray, sr: int) -> dict[str, float]
         + min(centroid / 2000.0, 1.0) * 0.3
         + music_stability * 0.7
         - speech_modulation * 1.3
-        - voiced_band_ratio * 0.6,
+        - voiced_band_ratio * 0.6
+        - (0.5 if is_pink_noise else 0.0),
         0.0,
         1.0,
     )
@@ -295,7 +306,8 @@ def _compute_heuristic_probabilities(y: np.ndarray, sr: int) -> dict[str, float]
         + centroid_bias * 1.0
         + speech_modulation * 2.0
         + max(0.0, 1.0 - low_mid_ratio) * 0.5
-        - music_stability * 0.5,
+        - music_stability * 0.5
+        - (0.5 if is_pink_noise else 0.0),
         0.0,
         1.0,
     )
@@ -304,7 +316,8 @@ def _compute_heuristic_probabilities(y: np.ndarray, sr: int) -> dict[str, float]
         + flatness * 2.1
         + high_ratio * 1.5
         + max(0.0, 0.55 - voice_ratio) * 0.9
-        + max(0.0, 0.55 - low_mid_ratio) * 0.7,
+        + max(0.0, 0.55 - low_mid_ratio) * 0.7
+        + (0.8 if is_pink_noise else 0.0),
         0.0,
         1.0,
     )
