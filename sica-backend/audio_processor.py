@@ -17,6 +17,8 @@ FAST_ANALYSIS_ENABLED = os.getenv("SICA_FAST_ANALYSIS", "true").lower() == "true
 EMA_ALPHA = float(os.getenv("SICA_EMA_ALPHA", "0.6"))
 # Peso do score de musicalidade na recomendação (0 = desligado)
 MUSIC_SCORE_WEIGHT = float(os.getenv("SICA_MUSIC_SCORE_WEIGHT", "0.25"))
+# LUFS alvo para recomendação de volume de música (padrão: -23.0 LUFS, nível de radiodifusão)
+MUSIC_TARGET_LUFS = float(os.getenv("SICA_MUSIC_TARGET_LUFS", "-23.0"))
 
 
 def compute_loudness_lufs(y: np.ndarray, sr: int) -> float:
@@ -32,7 +34,7 @@ def compute_loudness_lufs(y: np.ndarray, sr: int) -> float:
         return -70.0
 
     try:
-        meter = pyloudnorm.Meter(sr, block_size=int(sr * 0.4))
+        meter = pyloudnorm.Meter(sr, block_size=0.4)
         y_f = np.asarray(y, dtype=np.float32)
         if y_f.ndim > 1:
             y_f = y_f.mean(axis=0)
@@ -197,11 +199,11 @@ def compute_volume_recommendation(
     diff_snr = target_snr - snr_db
 
     # Musicalidade robusta: score de onset/tempo/rolloff complementa o PANNs
-    effective_music = max(music_prob, music_score * MUSIC_SCORE_WEIGHT * 100.0)
+    effective_music = max(music_prob, music_score * MUSIC_SCORE_WEIGHT)
 
-    if music_score < 20.0 and speech_prob > 45.0:
+    if music_prob < 25.0 and speech_prob > 45.0:
         return 0, "Vozes humanas predominantes. Música ambiente não identificada; ajuste suspenso."
-    if music_score < 15.0 and noise_prob > 50.0:
+    if music_prob < 20.0 and noise_prob > 50.0:
         return 0, "Ruído mecânico/ambiente dominante sem detecção de música no sinal."
 
     suggested_adjustment = int(np.clip(np.round(diff_snr), -6, 6))
@@ -215,7 +217,7 @@ def compute_volume_recommendation(
             f"Música alta percebida ({total_dba:.0f} dBA). Volume já está elevado; não aumentar.",
         )
 
-    if lufs > -23.0 and suggested_adjustment > 0:
+    if lufs > MUSIC_TARGET_LUFS and suggested_adjustment > 0:
         return (
             0,
             f"Loudness integrada ({lufs:.0f} LUFS) já está em nível de radiodifusão. Não aumentar.",
@@ -553,7 +555,8 @@ def summarize_windowed_analysis(window_results: list[dict[str, Any]]) -> dict[st
             ),
             "lufs": round(lufs, 1),
             "music_score": round(music_score, 1),
-            "is_music_detected": avg_music >= 35.0 or music_score >= 35.0,
+            "is_music_detected": avg_music >= 35.0
+            or (music_score >= 35.0 and avg_music >= avg_speech and avg_music >= avg_noise),
             "band_dba": band_dba_agg,
         },
         "recommendation": {
@@ -705,8 +708,12 @@ def process_audio_file(file_path: str) -> dict[str, Any]:
                     "lufs": lufs,
                     "music_score": music_score,
                     "is_music_detected": music_prob >= 35.0
-                    or (flatness < 0.25 and rms_harmonic > 0.01)
-                    or music_score >= 35.0,
+                    or (flatness < 0.25 and rms_harmonic > 0.01 and music_prob >= speech_prob)
+                    or (
+                        music_score >= 35.0
+                        and music_prob >= speech_prob
+                        and music_prob >= noise_prob
+                    ),
                     "band_dba": band_dba,
                 },
                 "recommendation": {

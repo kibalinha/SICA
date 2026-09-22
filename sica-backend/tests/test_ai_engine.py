@@ -2,12 +2,18 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+from scipy import signal as scipy_signal
 
-from ai_engine import PannsEngine, _categorize_panns_probs, get_ai_engine
+from ai_engine import (
+    HeuristicAudioEngine,
+    PannsEngine,
+    _categorize_panns_probs,
+    get_ai_engine,
+)
 
 
 class TestPannsCategorization:
-    def test_categorize_panns_probs(self):
+    def test_categorize_panns_probs(self) -> None:
         mock_labels = [
             "Speech",
             "Male speech",
@@ -32,16 +38,16 @@ class TestPannsCategorization:
 
 class TestPannsEngine:
     @pytest.fixture
-    def engine(self):
+    def engine(self) -> PannsEngine:
         return PannsEngine()
 
-    def test_engine_initialization(self, engine):
+    def test_engine_initialization(self, engine: PannsEngine) -> None:
         assert engine is not None
         assert hasattr(engine, "model")
         assert hasattr(engine, "labels")
         assert len(engine.labels) == 527
 
-    def test_analyze_soundscape(self, engine):
+    def test_analyze_soundscape(self, engine: PannsEngine) -> None:
         sr = 22050
         duration = 1.0
         t = np.linspace(0, duration, int(sr * duration), endpoint=False)
@@ -58,7 +64,7 @@ class TestPannsEngine:
         assert 0 <= result["confidence"] <= 1
         assert result["model_name"] == "PANNs Cnn14 (AudioSet, 527 classes)"
 
-    def test_neural_speech_mask(self, engine):
+    def test_neural_speech_mask(self, engine: PannsEngine) -> None:
         freqs = np.linspace(0, 11025, 1025)
         stft_harmonic = np.random.randn(1025, 100).astype(np.float32)
 
@@ -70,7 +76,7 @@ class TestPannsEngine:
         assert applied
         assert not np.allclose(filtered, stft_harmonic)
 
-    def test_analyze_silent_signal_is_not_misclassified(self, engine):
+    def test_analyze_silent_signal_is_not_misclassified(self, engine: PannsEngine) -> None:
         y = np.zeros(22050, dtype=np.float32)
 
         result = engine.analyze_soundscape(y, 22050)
@@ -91,11 +97,15 @@ class TestPannsEngine:
             ("voice_noise", "speech", 30.0),
             ("voice_noise_heavy", "speech", 35.0),
             ("all_three", "speech", 25.0),
+            ("hvac_noise", "ambient_noise", 30.0),
+            ("percussive_music", "music", 10.0),
+            ("music_with_speech", "music", 15.0),
+            ("crowd_noise", "speech", 25.0),
         ],
     )
     def test_various_realistic_audio_scenarios(
-        self, engine, scenario, expected_label, minimum_score
-    ):
+        self, engine: PannsEngine, scenario: str, expected_label: str, minimum_score: float
+    ) -> None:
         sr = 22050
         t = np.linspace(0, 1.0, sr, endpoint=False)
         rng = np.random.default_rng(42)
@@ -143,6 +153,39 @@ class TestPannsEngine:
                 + np.sin(2 * np.pi * 180 * t) * 0.30
                 + rng.normal(0.0, 0.18, sr)
             )
+        elif scenario == "hvac_noise":
+            y = rng.normal(0.0, 0.30, sr)
+            sos = scipy_signal.butter(4, 600.0 / (sr / 2), btype="low", output="sos")
+            y = scipy_signal.sosfilt(sos, y)
+        elif scenario == "percussive_music":
+            y = np.zeros(sr, dtype=np.float32)
+            beat_interval = 0.5
+            for onset_time in np.arange(0, 1.0, beat_interval):
+                idx = int(onset_time * sr)
+                decay = np.exp(-np.arange(min(4000, sr - idx)) / 1500.0)
+                y[idx : idx + len(decay)] += decay.astype(np.float32) * 0.6
+            for onset_time in np.arange(0.25, 1.0, beat_interval):
+                idx = int(onset_time * sr)
+                decay = np.exp(-np.arange(min(4000, sr - idx)) / 1200.0)
+                y[idx : idx + len(decay)] += decay.astype(np.float32) * 0.4
+            y = y.astype(np.float32)
+        elif scenario == "music_with_speech":
+            y = (
+                np.sin(2 * np.pi * 220 * t) * 0.50
+                + np.sin(2 * np.pi * 330 * t) * 0.30
+                + np.sin(2 * np.pi * 440 * t) * 0.20
+            ).astype(np.float32)
+            voice = np.sin(2 * np.pi * 180 * t) * 0.25
+            voice = voice * np.clip(1.0 + 0.6 * np.sin(2 * np.pi * 4 * t), 0.3, 1.5)
+            y = y + voice.astype(np.float32)
+        elif scenario == "crowd_noise":
+            voices = np.zeros(sr, dtype=np.float32)
+            for f0 in [160, 200, 240, 300]:
+                voice = np.sin(2 * np.pi * f0 * t) * 0.15
+                mod = np.clip(1.0 + 0.6 * np.sin(2 * np.pi * (4 + f0 * 0.001) * t), 0.2, 1.8)
+                voices += voice * mod
+            voices += rng.normal(0.0, 0.10, sr)
+            y = voices.astype(np.float32)
         else:
             y = np.zeros(sr, dtype=np.float32)
 
@@ -152,14 +195,77 @@ class TestPannsEngine:
         assert probs[expected_label] >= minimum_score
 
 
+class TestHeuristicAudioEngine:
+    @pytest.fixture
+    def heuristic_engine(self) -> HeuristicAudioEngine:
+        return HeuristicAudioEngine()
+
+    def test_analyze_soundscape_returns_valid_structure(
+        self, heuristic_engine: HeuristicAudioEngine
+    ) -> None:
+        sr = 22050
+        duration = 1.0
+        t = np.linspace(0, duration, int(sr * duration), endpoint=False)
+        y = (
+            np.sin(2 * np.pi * 220 * t) * 0.5
+            + np.sin(2 * np.pi * 330 * t) * 0.3
+            + np.sin(2 * np.pi * 440 * t) * 0.2
+        ).astype(np.float32)
+
+        result = heuristic_engine.analyze_soundscape(y, sr)
+
+        assert "probabilities" in result
+        assert "music" in result["probabilities"]
+        assert "speech" in result["probabilities"]
+        assert "ambient_noise" in result["probabilities"]
+        assert "dominant_scene" in result
+        assert 0 <= result["confidence"] <= 1
+        assert result["model_name"] == "HeuristicAudioEngine"
+        assert result["device"] == "cpu"
+
+    def test_silent_signal_is_ambient_noise(
+        self, heuristic_engine: HeuristicAudioEngine
+    ) -> None:
+        y = np.zeros(22050, dtype=np.float32)
+        result = heuristic_engine.analyze_soundscape(y, 22050)
+        assert result["probabilities"]["ambient_noise"] >= 80.0
+        assert result["probabilities"]["music"] < 10.0
+
+    def test_music_signal_scores_higher_than_noise_signal(
+        self, heuristic_engine: HeuristicAudioEngine
+    ) -> None:
+        sr = 22050
+        duration = 1.0
+        t = np.linspace(0, duration, sr, endpoint=False)
+        music = (
+            np.sin(2 * np.pi * 220 * t) * 0.5
+            + np.sin(2 * np.pi * 330 * t) * 0.3
+            + np.sin(2 * np.pi * 440 * t) * 0.2
+        ).astype(np.float32)
+        rng = np.random.default_rng(42)
+        noise = rng.normal(0.0, 0.35, sr).astype(np.float32)
+
+        music_result = heuristic_engine.analyze_soundscape(music, sr)
+        noise_result = heuristic_engine.analyze_soundscape(noise, sr)
+
+        assert (
+            music_result["probabilities"]["music"]
+            > noise_result["probabilities"]["music"]
+        )
+        assert (
+            noise_result["probabilities"]["ambient_noise"]
+            > music_result["probabilities"]["ambient_noise"]
+        )
+
+
 class TestGetAIEngine:
-    def test_singleton(self):
+    def test_singleton(self) -> None:
         engine1 = get_ai_engine()
         engine2 = get_ai_engine()
         assert engine1 is engine2
         assert isinstance(engine1, PannsEngine)
 
-    def test_fallback_when_panns_unavailable(self, monkeypatch):
+    def test_fallback_when_panns_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import ai_engine
 
         monkeypatch.setattr(ai_engine, "_engine_instance", None)

@@ -658,31 +658,15 @@ class HeuristicAudioEngine:
                 "device": self.device,
             }
 
-        rms = float(np.sqrt(np.mean(np.square(y))))
-        peak = float(np.max(np.abs(y)))
-        stft = librosa.stft(y, n_fft=2048, hop_length=512)
-        mag, _ = librosa.magphase(stft)
-        flatness = float(np.mean(librosa.feature.spectral_flatness(S=mag)))
-        centroid = float(np.mean(librosa.feature.spectral_centroid(y=y, sr=sr)))
-
-        music_score = min(1.0, 0.35 + (rms * 5.0) + (1.0 - flatness) * 0.5)
-        speech_score = min(1.0, 0.25 + (centroid / 4000.0) * 0.75 + (peak * 0.8))
-        noise_score = max(0.0, 1.0 - music_score - speech_score)
-
-        music_prob = max(0.0, min(100.0, music_score * 100.0))
-        speech_prob = max(0.0, min(100.0, speech_score * 100.0))
-        noise_prob = max(0.0, min(100.0, noise_score * 100.0))
-
-        total = music_prob + speech_prob + noise_prob
-        if total > 0:
-            music_prob = (music_prob / total) * 100.0
-            speech_prob = (speech_prob / total) * 100.0
-            noise_prob = (noise_prob / total) * 100.0
+        probs = _compute_heuristic_probabilities(y, sr)
+        music_prob = probs["music"]
+        speech_prob = probs["speech"]
+        noise_prob = probs["ambient_noise"]
 
         probs_dict = {
-            "music": round(float(music_prob), 1),
-            "speech": round(float(speech_prob), 1),
-            "ambient_noise": round(float(noise_prob), 1),
+            "music": round(music_prob, 1),
+            "speech": round(speech_prob, 1),
+            "ambient_noise": round(noise_prob, 1),
         }
 
         classes = ["Música", "Vozes / Conversas", "Ruído Ambiente"]
