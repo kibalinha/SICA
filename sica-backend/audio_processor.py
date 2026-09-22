@@ -20,6 +20,37 @@ MUSIC_SCORE_WEIGHT = float(os.getenv("SICA_MUSIC_SCORE_WEIGHT", "0.25"))
 # LUFS alvo para recomendação de volume de música (padrão: -23.0 LUFS, nível de radiodifusão)
 MUSIC_TARGET_LUFS = float(os.getenv("SICA_MUSIC_TARGET_LUFS", "-23.0"))
 
+# Thresholds adaptativos de ambiente comercial (shopping vs store vs restaurante)
+AMBIENT_PROFILES: dict[str, dict[str, float]] = {
+    "shopping": {
+        "music_detection_threshold": 35.0,
+        "music_score_threshold": 35.0,
+        "total_dba_too_loud": 82.0,
+        "harmonic_dba_too_loud": 78.0,
+        "peak_near_saturation": 0.90,
+        "effective_music_high": 50.0,
+    },
+    "store": {
+        "music_detection_threshold": 35.0,
+        "music_score_threshold": 35.0,
+        "total_dba_too_loud": 78.0,
+        "harmonic_dba_too_loud": 75.0,
+        "peak_near_saturation": 0.88,
+        "effective_music_high": 45.0,
+    },
+    "restaurant": {
+        "music_detection_threshold": 35.0,
+        "music_score_threshold": 35.0,
+        "total_dba_too_loud": 75.0,
+        "harmonic_dba_too_loud": 72.0,
+        "peak_near_saturation": 0.85,
+        "effective_music_high": 40.0,
+    },
+}
+AMBIENT_PROFILE = AMBIENT_PROFILES.get(
+    os.getenv("SICA_AMBIENT_PROFILE", "shopping").lower(), AMBIENT_PROFILES["shopping"]
+)
+
 
 def compute_loudness_lufs(y: np.ndarray, sr: int) -> float:
     """Loudness integrada em LUFS (K-weighting, EBU R128) via pyloudnorm.
@@ -109,11 +140,11 @@ def _get_analysis_window_config(
 
     if fast_mode:
         window_size = max(1024, int(sample_rate * 1.0))
-        hop_size = window_size
-        max_windows = 2
+        hop_size = max(1, window_size // 2)
+        max_windows = 3
     else:
         window_size = int(sample_rate * 3.0)
-        hop_size = int(sample_rate * 1.5)
+        hop_size = max(1, window_size // 2)
         max_windows = 8
 
     return {
@@ -208,10 +239,15 @@ def compute_volume_recommendation(
 
     suggested_adjustment = int(np.clip(np.round(diff_snr), -6, 6))
 
-    if peak_level > 0.90 and suggested_adjustment > 0:
+    peak_threshold = AMBIENT_PROFILE["peak_near_saturation"]
+    music_high = AMBIENT_PROFILE["effective_music_high"]
+    dba_too_loud = AMBIENT_PROFILE["total_dba_too_loud"]
+    harmonic_threshold = AMBIENT_PROFILE["harmonic_dba_too_loud"]
+
+    if peak_level > peak_threshold and suggested_adjustment > 0:
         return 0, "Música muito alta perto do microfone; sinal próximo à saturação. Não aumentar."
 
-    if effective_music >= 50.0 and total_dba >= 82.0:
+    if effective_music >= music_high and total_dba >= dba_too_loud:
         return (
             0,
             f"Música alta percebida ({total_dba:.0f} dBA). Volume já está elevado; não aumentar.",
@@ -223,15 +259,15 @@ def compute_volume_recommendation(
             f"Loudness integrada ({lufs:.0f} LUFS) já está em nível de radiodifusão. Não aumentar.",
         )
 
-    if total_dba > 80.0 and suggested_adjustment > 0:
+    if total_dba > dba_too_loud - 2.0 and suggested_adjustment > 0:
         return 0, f"Nível já elevado ({total_dba:.0f} dBA). Aumento não recomendado."
 
-    if harmonic_dba > 78.0 and suggested_adjustment > 0:
+    if harmonic_dba > harmonic_threshold and suggested_adjustment > 0:
         return 0, f"Componente harmônico (música) já alto ({harmonic_dba:.0f} dBA)."
 
     if (
         confidence > 0.7
-        and effective_music > 50.0
+        and effective_music > music_high
         and 68.0 <= total_dba <= 78.0
         and suggested_adjustment > 0
     ):
@@ -283,8 +319,10 @@ def compute_volume_recommendation(
                 f"Excesso de ar ({air_level:.0f} dBA) pode indicar ruído artificial ou compressão excessiva. Verificar cadeia de sinal.",
             )
 
+    music_threshold = AMBIENT_PROFILE["music_detection_threshold"]
+
     if (
-        music_prob >= 35.0
+        music_prob >= music_threshold
         and noise_prob >= 40.0
         and total_dba >= 55.0
         and snr_db >= -3.0
@@ -296,7 +334,7 @@ def compute_volume_recommendation(
         )
 
     if (
-        music_prob >= 35.0
+        music_prob >= music_threshold
         and noise_prob >= 45.0
         and total_dba >= 58.0
         and snr_db >= -2.0
@@ -307,7 +345,12 @@ def compute_volume_recommendation(
             "Ruído ambiente próximo da música; o nível não está claramente subdimensionado. Não aumentar.",
         )
 
-    if music_prob >= 35.0 and total_dba < 60.0 and noise_prob < 45.0 and suggested_adjustment > 0:
+    if (
+        music_prob >= music_threshold
+        and total_dba < 60.0
+        and noise_prob < 45.0
+        and suggested_adjustment > 0
+    ):
         return (
             suggested_adjustment,
             f"Música baixa no ambiente, mas ainda em faixa aceitável. Aumentar {suggested_adjustment} dB.",
@@ -555,8 +598,12 @@ def summarize_windowed_analysis(window_results: list[dict[str, Any]]) -> dict[st
             ),
             "lufs": round(lufs, 1),
             "music_score": round(music_score, 1),
-            "is_music_detected": avg_music >= 35.0
-            or (music_score >= 35.0 and avg_music >= avg_speech and avg_music >= avg_noise),
+            "is_music_detected": avg_music >= AMBIENT_PROFILE["music_detection_threshold"]
+            or (
+                music_score >= AMBIENT_PROFILE["music_score_threshold"]
+                and avg_music >= avg_speech
+                and avg_music >= avg_noise
+            ),
             "band_dba": band_dba_agg,
         },
         "recommendation": {
@@ -707,10 +754,10 @@ def process_audio_file(file_path: str) -> dict[str, Any]:
                     "spectral_flatness": flatness,
                     "lufs": lufs,
                     "music_score": music_score,
-                    "is_music_detected": music_prob >= 35.0
+                    "is_music_detected": music_prob >= AMBIENT_PROFILE["music_detection_threshold"]
                     or (flatness < 0.25 and rms_harmonic > 0.01 and music_prob >= speech_prob)
                     or (
-                        music_score >= 35.0
+                        music_score >= AMBIENT_PROFILE["music_score_threshold"]
                         and music_prob >= speech_prob
                         and music_prob >= noise_prob
                     ),

@@ -13,8 +13,18 @@ class TestFastAnalysisConfig:
     def test_fast_mode_uses_lighter_windowing(self) -> None:
         cfg = _get_analysis_window_config(22050 * 5, 22050, fast_mode=True)
         assert cfg["window_size"] <= int(22050 * 1.5)
-        assert cfg["hop_size"] == cfg["window_size"]
-        assert cfg["max_windows"] == 2
+        assert cfg["hop_size"] == cfg["window_size"] // 2  # 50% overlap
+        assert cfg["max_windows"] == 3
+
+    def test_non_fast_mode_uses_50_percent_overlap(self) -> None:
+        cfg = _get_analysis_window_config(22050 * 10, 22050, fast_mode=False)
+        assert cfg["hop_size"] == cfg["window_size"] // 2  # 50% overlap
+        assert cfg["max_windows"] == 8
+
+    def test_fast_mode_produces_overlapping_windows(self) -> None:
+        cfg = _get_analysis_window_config(22050 * 5, 22050, fast_mode=True)
+        assert cfg["hop_size"] < cfg["window_size"]
+        assert cfg["hop_size"] > 0
 
 
 class TestAWeightingCurve:
@@ -423,3 +433,50 @@ class TestIsMusicDetected:
 
         music_score = compute_music_score(y, sr)
         assert music_score >= 35.0, "Noise signal may have high music_score (heuristic)"
+
+
+class TestAmbientProfile:
+    def test_default_profile_is_shopping(self) -> None:
+        from audio_processor import AMBIENT_PROFILE
+
+        assert AMBIENT_PROFILE["total_dba_too_loud"] == 82.0
+        assert AMBIENT_PROFILE["harmonic_dba_too_loud"] == 78.0
+        assert AMBIENT_PROFILE["music_detection_threshold"] == 35.0
+
+    def test_restaurant_profile_has_lower_thresholds(self) -> None:
+        from audio_processor import AMBIENT_PROFILES
+
+        restaurant = AMBIENT_PROFILES["restaurant"]
+        assert restaurant["total_dba_too_loud"] < AMBIENT_PROFILES["shopping"]["total_dba_too_loud"]
+        assert restaurant["harmonic_dba_too_loud"] < AMBIENT_PROFILES["shopping"]["harmonic_dba_too_loud"]
+
+    def test_store_profile_is_between_shopping_and_restaurant(self) -> None:
+        from audio_processor import AMBIENT_PROFILES
+
+        store = AMBIENT_PROFILES["store"]
+        shopping = AMBIENT_PROFILES["shopping"]
+        restaurant = AMBIENT_PROFILES["restaurant"]
+        assert store["total_dba_too_loud"] <= shopping["total_dba_too_loud"]
+        assert store["total_dba_too_loud"] >= restaurant["total_dba_too_loud"]
+
+
+class TestLUFSAccuracy:
+    def test_lufs_returns_real_value_not_fallback(self) -> None:
+        sr = 22050
+        duration = 2.0
+        t = np.linspace(0, duration, int(sr * duration), endpoint=False)
+        y = (np.sin(2 * np.pi * 220 * t) * 0.5).astype(np.float32)
+        lufs = compute_loudness_lufs(y, sr)
+        assert lufs != -70.0, "LUFS should return a real measurement, not the -70.0 fallback"
+        assert -70.0 < lufs <= 0.0, f"LUFS should be between -70 and 0, got {lufs}"
+
+    def test_lufs_quiet_audio_is_lower_than_loud(self) -> None:
+        sr = 22050
+        t = np.linspace(0, 2.0, int(sr * 2.0), endpoint=False)
+        loud = (np.sin(2 * np.pi * 220 * t) * 0.5).astype(np.float32)
+        quiet = (np.sin(2 * np.pi * 220 * t) * 0.05).astype(np.float32)
+        assert compute_loudness_lufs(loud, sr) > compute_loudness_lufs(quiet, sr)
+
+    def test_lufs_empty_audio_returns_fallback(self) -> None:
+        lufs = compute_loudness_lufs(np.array([], dtype=np.float32), 22050)
+        assert lufs == -70.0
